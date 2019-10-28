@@ -20,36 +20,31 @@ def defuse(y, shapes):
 
 
 class KungFuOptimizer(tf.train.Optimizer):
-    """An optimizer that would negotiate the gradients before apply it."""
     def __init__(self, optimizer, name=None, use_locking=False):
         if name is None:
             name = "KungFu{}".format(type(optimizer).__name__)
         super(KungFuOptimizer, self).__init__(name=name,
                                               use_locking=use_locking)
         self._optimizer = optimizer
-
-    # distributed_initializer must be called after minimize
-    def distributed_initializer(self):
-        raise RuntimeError(
-            'Distributed optimizers must implement how variables are replicated.'
-        )
+        self._step = tf.Variable(0, trainable=False, dtype=tf.int32)
 
     def compute_gradients(self, *args, **kwargs):
-        """Compute gradients and negotiate with peers."""
-        return self._optimizer.compute_gradients(*args, **kwargs)
+        broadcast_cond_op = tf.cond(
+            tf.equal(self._step,
+                     0), lambda: self._synchronize_states(self.variables()),
+            lambda: tf.no_op())
+        with tf.control_dependencies([broadcast_cond_op]):
+            with tf.control_dependencies([tf.assign_add(self._step, 1)]):
+                return self._optimizer.compute_gradients(*args, **kwargs)
 
     def apply_gradients(self, *args, **kwargs):
-        """Calls this same method on the underlying optimizer."""
         return self._optimizer.apply_gradients(*args, **kwargs)
 
     def get_slot(self, *args, **kwargs):
-        """Calls this same method on the underlying optimizer."""
         return self._optimizer.get_slot(*args, **kwargs)
 
     def get_slot_names(self, *args, **kwargs):
-        """Calls this same method on the underlying optimizer."""
         return self._optimizer.get_slot_names(*args, **kwargs)
 
     def variables(self, *args, **kwargs):
-        """Calls this same method on the underlying optimizer."""
         return self._optimizer.variables(*args, **kwargs)

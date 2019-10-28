@@ -67,13 +67,14 @@ class SynchronousSGDOptimizer(KungFuOptimizer):
         return self._optimizer.apply_gradients(reduced_grads_and_vars,
                                                **kwargs)
 
-    def distributed_initializer(self):
-        ops = [tf.assign(v, broadcast(v)) for v in self.variables()]
+    def _synchronize_states(self, variables):
+        ops = [tf.assign(v, broadcast(v)) for v in variables]
         return tf.group(ops)
 
 
 class SyncSGDWithGradVarianceOptimizer(KungFuOptimizer):
-    """SyncSGDWithGradVarianceOptimizer monitors gradient variance when performing synchronous SGD.
+    """
+    SyncSGDWithGradVarianceOptimizer monitors gradient variance when performing synchronous SGD.
 
     You can find the defintion of variance of tensors here:
     https://en.wikipedia.org/wiki/Variance
@@ -150,8 +151,8 @@ class SyncSGDWithGradVarianceOptimizer(KungFuOptimizer):
                 return self._optimizer.apply_gradients(
                     zip(reduced_grads, variables), **kwargs)
 
-    def distributed_initializer(self):
-        ops = [tf.assign(v, broadcast(v)) for v in self.variables()]
+    def _synchronize_states(self, variables):
+        ops = [tf.assign(v, broadcast(v)) for v in variables]
         return tf.group(ops)
 
 

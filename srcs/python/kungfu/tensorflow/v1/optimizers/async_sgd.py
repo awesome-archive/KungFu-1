@@ -70,8 +70,8 @@ class PairAveragingOptimizer(KungFuOptimizer):
         variables = [v for _g, v in grads_and_vars]
 
         with tf.control_dependencies([self._sync_state_op]):
-            other_peer_vars, save_model_op = self._build_request_and_save_ops(
-                target, variables)
+            other_peer_vars = self._build_request_ops(target, variables)
+            save_model_op = self._build_save_op(variables)
 
         assign_ops = [
             tf.assign(v, 0.5 * (v + other_v))
@@ -85,27 +85,22 @@ class PairAveragingOptimizer(KungFuOptimizer):
                 with tf.control_dependencies([save_model_op]):
                     return tf.group(apply_op)
 
-    def _build_request_and_save_ops(self, target, variables):
+    def _build_request_ops(self, target, variables):
         if self._fuse_variables:
             var_fused = self._get_fused_vars(variables)
-            save_model_op = save_variable(var_fused)
             other_peer_var_fused = request_variable_with_template(
                 target, var_fused)
-            other_peer_vars = self._get_defused_vars(other_peer_var_fused)
+            return self._get_defused_vars(other_peer_var_fused)
         else:
-            save_model_op = tf.group([save_variable(v) for v in variables])
-            other_peer_vars = [
+            return [
                 request_variable_with_template(target, v) for v in variables
             ]
-        return other_peer_vars, save_model_op
 
-    def _build_init_store(self, variables):
+    def _build_save_op(self, variables):
         if self._fuse_variables:
-            var_fused = self._get_fused_vars(variables)
-            save_model_op = save_variable(var_fused)
+            return save_variable(self._get_fused_vars(variables))
         else:
-            save_model_op = tf.group([save_variable(v) for v in variables])
-        return save_model_op
+            return tf.group([save_variable(v) for v in variables])
 
     def _synchronize_states(self):
         bcast_ops = []
@@ -116,6 +111,6 @@ class PairAveragingOptimizer(KungFuOptimizer):
         trainable_variables = tf.trainable_variables()
 
         with tf.control_dependencies(bcast_ops):
-            init_store_op = self._build_init_store(trainable_variables)
+            init_store_op = self._build_save_op(trainable_variables)
             with tf.control_dependencies([init_store_op]):
                 return barrier()

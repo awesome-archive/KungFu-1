@@ -42,22 +42,18 @@ class AdaptiveSGDOptimizer(KungFuOptimizer):
         self._save_model_op = save_model_op  # save for _get_initializer_op
         return other_peer_vars, save_model_op
 
-    # Asynchronous decentralised parallel SGD
+    # Asynchronous decentralized parallel SGD
     def _async_ma_sgd(self, grads_and_vars, **kwargs):
-        target = get_random_peer(self._num_workers, self._rank)
         variables = [v for _g, v in grads_and_vars]
-        other_peer_vars, save_model_op = self._build_request_and_save_ops(
-            target, variables)
-
         assign_ops = [
             tf.assign(v, 0.5 * (v + other_v))
-            for v, other_v in zip(variables, other_peer_vars)
+            for v, other_v in zip(variables, self._other_peer_vars)
         ]
 
         apply_op = self._optimizer.apply_gradients(grads_and_vars, **kwargs)
         with tf.control_dependencies(assign_ops):
             with tf.control_dependencies([apply_op]):
-                with tf.control_dependencies([save_model_op]):
+                with tf.control_dependencies([self._save_model_op]):
                     return tf.group(apply_op)
 
     # Synchronous model averaging SGD (SMA)
@@ -79,10 +75,17 @@ class AdaptiveSGDOptimizer(KungFuOptimizer):
                 cond_op, lambda: self._sync_ma_sgd(grads_and_vars, **kwargs),
                 lambda: self._async_ma_sgd(grads_and_vars, **kwargs))
 
-    def distributed_initializer(self):
+    def _synchronize_states(self):
         bcast_ops = []
-        for v in self.variables():
+        for v in tf.global_variables():
             bcast_ops.append(tf.assign(v, broadcast(v)))
+
+        # We only need to the trainable variables for synchronization.
+        np, rank = current_cluster_size(), current_rank()
+        target = get_random_peer(np, rank)
+        trainable_variables = tf.trainable_variables()
+        self._other_peer_vars, self._save_model_op = self._build_request_and_save_ops(
+            target, trainable_variables)
 
         with tf.control_dependencies(bcast_ops):
             with tf.control_dependencies([self._save_model_op]):

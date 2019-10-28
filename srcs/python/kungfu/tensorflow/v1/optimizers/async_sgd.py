@@ -53,6 +53,20 @@ class PairAveragingOptimizer(KungFuOptimizer):
                                                      use_locking)
         self._fuse_variables = fuse_variables
 
+    def apply_gradients(self, grads_and_vars, **kwargs):
+        variables = [v for _g, v in grads_and_vars]
+        assign_ops = [
+            tf.assign(v, 0.5 * (v + other_v))
+            for v, other_v in zip(variables, self._other_peer_vars)
+        ]
+
+        apply_op = self._optimizer.apply_gradients(grads_and_vars, **kwargs)
+
+        with tf.control_dependencies(assign_ops):
+            with tf.control_dependencies([apply_op]):
+                with tf.control_dependencies([self._save_model_op]):
+                    return tf.group(apply_op)
+
     def _build_request_and_save_ops(self, target, variables):
         if self._fuse_variables:
             var_fused = fuse(variables)
@@ -66,33 +80,19 @@ class PairAveragingOptimizer(KungFuOptimizer):
             other_peer_vars = [
                 request_variable_with_template(target, v) for v in variables
             ]
-        self._save_model_op = save_model_op  # save for _get_initializer_op
         return other_peer_vars, save_model_op
 
-    def apply_gradients(self, grads_and_vars, **kwargs):
-        """Calls this same method on the underlying optimizer."""
+    def _synchronize_states(self):
+        bcast_ops = []
+        for v in tf.global_variables():
+            bcast_ops.append(tf.assign(v, broadcast(v)))
+
+        # We only need to the trainable variables for synchronization.
         np, rank = current_cluster_size(), current_rank()
         target = get_random_peer(np, rank)
-        variables = [v for _g, v in grads_and_vars]
-        other_peer_vars, save_model_op = self._build_request_and_save_ops(
-            target, variables)
-
-        assign_ops = [
-            tf.assign(v, 0.5 * (v + other_v))
-            for v, other_v in zip(variables, other_peer_vars)
-        ]
-
-        apply_op = self._optimizer.apply_gradients(grads_and_vars, **kwargs)
-
-        with tf.control_dependencies(assign_ops):
-            with tf.control_dependencies([apply_op]):
-                with tf.control_dependencies([save_model_op]):
-                    return tf.group(apply_op)
-
-    def distributed_initializer(self):
-        bcast_ops = []
-        for v in self.variables():
-            bcast_ops.append(tf.assign(v, broadcast(v)))
+        trainable_variables = tf.trainable_variables()
+        self._other_peer_vars, self._save_model_op = self._build_request_and_save_ops(
+            target, trainable_variables)
 
         with tf.control_dependencies(bcast_ops):
             with tf.control_dependencies([self._save_model_op]):

@@ -29,10 +29,10 @@ class KungFuOptimizer(tf.train.Optimizer):
         self._step = tf.Variable(0, trainable=False, dtype=tf.int32)
 
     def compute_gradients(self, *args, **kwargs):
-        sync_state_op = tf.cond(tf.equal(self._step, 0),
-                                lambda: self._synchronize_states(),
-                                lambda: tf.no_op())
-        with tf.control_dependencies([sync_state_op]):
+        self._sync_state_op = tf.cond(tf.equal(self._step, 0),
+                                      lambda: self._synchronize_states(),
+                                      lambda: tf.no_op())
+        with tf.control_dependencies([self._sync_state_op]):
             with tf.control_dependencies([tf.assign_add(self._step, 1)]):
                 return self._optimizer.compute_gradients(*args, **kwargs)
 
@@ -47,3 +47,6 @@ class KungFuOptimizer(tf.train.Optimizer):
 
     def variables(self, *args, **kwargs):
         return self._optimizer.variables(*args, **kwargs)
+
+    def _synchronize_states(self):
+        raise RuntimeError('NOT implemented')

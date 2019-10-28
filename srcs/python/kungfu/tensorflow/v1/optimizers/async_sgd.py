@@ -52,29 +52,46 @@ class PairAveragingOptimizer(KungFuOptimizer):
         super(PairAveragingOptimizer, self).__init__(optimizer, name,
                                                      use_locking)
         self._fuse_variables = fuse_variables
+        self._fused_variable = None
+        self._shapes = None
+
+    def _get_fused_vars(self, variables):
+        if self._fused_variable is None:
+            self._fused_variable = fuse(variables)
+            self._shapes = [v.shape for v in variables]
+        return self._fused_variable
+
+    def _get_defused_vars(self, concated_var):
+        return defuse(concated_var, self._shapes)
 
     def apply_gradients(self, grads_and_vars, **kwargs):
+        np, rank = current_cluster_size(), current_rank()
+        target = get_random_peer(np, rank)
         variables = [v for _g, v in grads_and_vars]
+
+        with tf.control_dependencies([self._sync_state_op]):
+            other_peer_vars, save_model_op = self._build_request_and_save_ops(
+                target, variables)
+
         assign_ops = [
             tf.assign(v, 0.5 * (v + other_v))
-            for v, other_v in zip(variables, self._other_peer_vars)
+            for v, other_v in zip(variables, other_peer_vars)
         ]
 
         apply_op = self._optimizer.apply_gradients(grads_and_vars, **kwargs)
 
         with tf.control_dependencies(assign_ops):
             with tf.control_dependencies([apply_op]):
-                with tf.control_dependencies([self._save_model_op]):
+                with tf.control_dependencies([save_model_op]):
                     return tf.group(apply_op)
 
     def _build_request_and_save_ops(self, target, variables):
         if self._fuse_variables:
-            var_fused = fuse(variables)
+            var_fused = self._get_fused_vars(variables)
             save_model_op = save_variable(var_fused)
             other_peer_var_fused = request_variable_with_template(
                 target, var_fused)
-            other_peer_vars = defuse(other_peer_var_fused,
-                                     [v.shape for v in variables])
+            other_peer_vars = self._get_defused_vars(other_peer_var_fused)
         else:
             save_model_op = tf.group([save_variable(v) for v in variables])
             other_peer_vars = [
@@ -82,18 +99,23 @@ class PairAveragingOptimizer(KungFuOptimizer):
             ]
         return other_peer_vars, save_model_op
 
+    def _build_init_store(self, variables):
+        if self._fuse_variables:
+            var_fused = self._get_fused_vars(variables)
+            save_model_op = save_variable(var_fused)
+        else:
+            save_model_op = tf.group([save_variable(v) for v in variables])
+        return save_model_op
+
     def _synchronize_states(self):
         bcast_ops = []
         for v in tf.global_variables():
             bcast_ops.append(tf.assign(v, broadcast(v)))
 
         # We only need to the trainable variables for synchronization.
-        np, rank = current_cluster_size(), current_rank()
-        target = get_random_peer(np, rank)
         trainable_variables = tf.trainable_variables()
-        self._other_peer_vars, self._save_model_op = self._build_request_and_save_ops(
-            target, trainable_variables)
 
         with tf.control_dependencies(bcast_ops):
-            with tf.control_dependencies([self._save_model_op]):
+            init_store_op = self._build_init_store(trainable_variables)
+            with tf.control_dependencies([init_store_op]):
                 return barrier()

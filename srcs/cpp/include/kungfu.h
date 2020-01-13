@@ -16,7 +16,7 @@ typedef struct order_group_s order_group_t;
 extern order_group_t *new_ranked_order_group(int n_names);
 extern void del_order_group(order_group_t *);
 extern void order_group_do_rank(order_group_t *, int rank, callback_t *task);
-extern void order_group_wait(order_group_t *);
+extern void order_group_wait(order_group_t *, int32_t *arrive_order);
 
 #ifdef __cplusplus
 }
@@ -39,6 +39,7 @@ class kungfu_world
 
     // metadata APIs
     int Rank() const;
+    int LocalRank() const;
     int ClusterSize() const;
 
     // local API
@@ -66,6 +67,11 @@ class kungfu_world
     // collective APIs
     int Barrier();
     int Barrier(const DoneCallback &done);
+
+    int Consensus(const void *buf, int count, KungFu_Datatype dtype, bool *ok,
+                  const char *name);
+    int Consensus(const void *buf, int count, KungFu_Datatype dtype, bool *ok,
+                  const char *name, const DoneCallback &done);
 
     // https://www.open-mpi.org/doc/v4.0/man3/MPI_Reduce.3.php
     int Reduce(const void *sendbuf, void *recvbuf, int count,
@@ -121,7 +127,8 @@ class kungfu_world
     int GetPeerLatencies(float *recvbuf, int recv_count);
 
     // control APIs
-    int ResizeCluster(const char *ckpt, int new_size, bool *keep);
+    int ResizeCluster(const char *init_step, int new_size, bool *changed,
+                      bool *keep);
 };
 
 #endif

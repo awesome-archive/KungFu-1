@@ -36,4 +36,10 @@ template <typename... Dims> TensorShape MakeTensorShape(const Dims &... dims)
     for (auto d : ds) { shape.AddDim(d); }
     return shape;
 }
+
+#define REGISTER_KUNGFU_OP(T)                                                  \
+    REGISTER_OP("Kungfu" #T).Attr("debug: bool = false")
+
+#define REGISTER_KUNGFU_KERNEL_BUILDER(T, D)                                   \
+    REGISTER_KERNEL_BUILDER(Name("Kungfu" #T).Device(D), T);
 }  // namespace tensorflow

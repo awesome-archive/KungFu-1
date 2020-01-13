@@ -6,7 +6,8 @@ import time
 t0 = time.time()  # before import tensorflow
 
 import tensorflow as tf
-from kungfu.tensorflow.v1.ops import all_reduce, barrier, current_cluster_size, get_init_checkpoint, resize_cluster
+from kungfu.tensorflow.ops import (all_reduce, barrier, current_cluster_size,
+                                   _get_init_step, resize_cluster)
 from tensorflow.python.util import deprecation
 
 deprecation._PRINT_DEPRECATION_WARNINGS = False
@@ -76,7 +77,7 @@ init = tf.global_variables_initializer()
 with tf.Session() as sess:
     sess.run(init)
 
-    init_gs = restore(get_init_checkpoint())
+    init_gs = restore(_get_init_step())
     np = current_cluster_size()
     init_np = get_cluster_size(init_gs, cluster_size_schedule, np)
     if np != init_np:
@@ -98,11 +99,11 @@ with tf.Session() as sess:
             new_np = get_cluster_size(next_gs, cluster_size_schedule, np)
             if new_np != np:
                 t0 = time.time()
-                keep = sess.run(resize_op,
-                                feed_dict={
-                                    ckpt: str(next_gs),
-                                    new_size: new_np,
-                                })
+                _, keep = sess.run(resize_op,
+                                   feed_dict={
+                                       ckpt: str(next_gs),
+                                       new_size: new_np,
+                                   })
                 print('resize %d -> %d took %s' %
                       (np, new_np, show_duration(time.time() - t0)))
                 np = new_np

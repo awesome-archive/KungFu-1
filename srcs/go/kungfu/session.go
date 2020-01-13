@@ -5,12 +5,11 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/lsds/KungFu/srcs/go/utils"
-
 	kb "github.com/lsds/KungFu/srcs/go/kungfubase"
 	"github.com/lsds/KungFu/srcs/go/log"
 	"github.com/lsds/KungFu/srcs/go/plan"
 	rch "github.com/lsds/KungFu/srcs/go/rchannel"
+	"github.com/lsds/KungFu/srcs/go/utils"
 )
 
 const defaultRoot = 0
@@ -23,15 +22,21 @@ type strategy struct {
 
 // session contains the immutable topology and strategies for a given period of logical duration
 type session struct {
-	strategies []strategy
-	self       plan.PeerID
-	cluster    plan.PeerList
-	myRank     int
-	router     *rch.Router
+	strategies   []strategy
+	self         plan.PeerID
+	peers        plan.PeerList
+	rank         int
+	localRank    int
+	router       *rch.Router
+	strategyHash strategyHashFunc
 }
 
 func newSession(strategy kb.Strategy, self plan.PeerID, pl plan.PeerList, router *rch.Router) (*session, bool) {
-	myRank, ok := pl.Lookup(self)
+	rank, ok := pl.Rank(self)
+	if !ok {
+		return nil, false
+	}
+	localRank, ok := pl.LocalRank(self)
 	if !ok {
 		return nil, false
 	}
@@ -39,21 +44,27 @@ func newSession(strategy kb.Strategy, self plan.PeerID, pl plan.PeerList, router
 		strategy = autoSelect(pl)
 	}
 	sess := &session{
-		strategies: partitionStrategies[strategy](pl),
-		self:       self,
-		cluster:    pl,
-		myRank:     myRank,
-		router:     router,
+		strategies:   partitionStrategies[strategy](pl),
+		self:         self,
+		peers:        pl,
+		rank:         rank,
+		localRank:    localRank,
+		router:       router,
+		strategyHash: getStrategyHash(),
 	}
 	return sess, true
 }
 
 func (sess *session) ClusterSize() int {
-	return len(sess.cluster)
+	return len(sess.peers)
 }
 
 func (sess *session) Rank() int {
-	return sess.myRank
+	return sess.rank
+}
+
+func (sess *session) LocalRank() int {
+	return sess.localRank
 }
 
 func (sess *session) Barrier() error {
@@ -61,7 +72,7 @@ func (sess *session) Barrier() error {
 }
 
 func (sess *session) barrier() error {
-	k := len(sess.cluster)
+	k := len(sess.peers)
 	count := k * 1
 	dtype := kb.U8
 	w := Workspace{
@@ -71,6 +82,48 @@ func (sess *session) barrier() error {
 		Name:    "kungfu::barrier", // TODO: use tag
 	}
 	return sess.runStrategies(w, plan.EvenPartition, sess.strategies)
+}
+
+func (sess *session) Consensus(w Workspace) error {
+	ok, err := sess.BytesConsensus(w.SendBuf.Data, w.Name)
+	if err != nil {
+		return err
+	}
+	w.RecvBuf.AsI8()[0] = boolToInt8(ok)
+	return nil
+}
+
+func (sess *session) BytesConsensus(bs []byte, name string) (bool, error) {
+	n := len(bs)
+	{
+		x := kb.NewVector(1, kb.I32)
+		y := kb.NewVector(1, kb.I32)
+		z := kb.NewVector(1, kb.I32)
+		x.AsI32()[0] = int32(n)
+		w1 := Workspace{SendBuf: x, RecvBuf: y, OP: kb.MIN, Name: ":consensus:len:min:" + name}
+		w2 := Workspace{SendBuf: x, RecvBuf: z, OP: kb.MAX, Name: ":consensus:len:max:" + name}
+		sess.AllReduce(w1)
+		sess.AllReduce(w2)
+		if !utils.BytesEq(x.Data, y.Data) || !utils.BytesEq(x.Data, z.Data) {
+			return false, nil
+		}
+	}
+	if n == 0 {
+		return true, nil
+	}
+	{
+		x := &kb.Vector{Data: bs, Count: n, Type: kb.U8}
+		y := kb.NewVector(n, kb.U8)
+		z := kb.NewVector(n, kb.U8)
+		w1 := Workspace{SendBuf: x, RecvBuf: y, OP: kb.MIN, Name: ":consensus:min:" + name}
+		w2 := Workspace{SendBuf: x, RecvBuf: z, OP: kb.MAX, Name: ":consensus:max:" + name}
+		sess.AllReduce(w1)
+		sess.AllReduce(w2)
+		if !utils.BytesEq(x.Data, y.Data) || !utils.BytesEq(x.Data, z.Data) {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 func (sess *session) AllReduce(w Workspace) error {
@@ -92,22 +145,12 @@ func (sess *session) Gather(w Workspace) error {
 	return sess.runGather(w)
 }
 
-func (sess *session) Request(rank int, name string, model *kb.Vector) error {
-	if rank < 0 || len(sess.cluster) <= rank {
-		return errInvalidRank
+func (sess *session) Request(rank int, version, name string, buf *kb.Vector) (bool, error) {
+	if rank < 0 || len(sess.peers) <= rank {
+		return false, errInvalidRank
 	}
-	peer := sess.cluster[rank]
-	return sess.router.Request(peer.WithName(name), model)
-}
-
-func (sess *session) Pull(rank int, version, name string, model *kb.Vector) error {
-	peer := sess.cluster[rank]
-	return sess.router.Pull(version, peer.WithName(name), model)
-}
-
-// FIXME: move it to kungfu
-func (sess *session) Save(name string, buf *kb.Vector) error {
-	return sess.router.Save(name, buf)
+	peer := sess.peers[rank]
+	return sess.router.P2P.Request(peer.WithName(name), version, asMessage(buf))
 }
 
 func asMessage(b *kb.Vector) rch.Message {
@@ -118,19 +161,19 @@ func asMessage(b *kb.Vector) rch.Message {
 }
 
 func (sess *session) runGather(w Workspace) error {
-	if sess.myRank != defaultRoot {
-		peer := sess.cluster[defaultRoot]
+	if sess.rank != defaultRoot {
+		peer := sess.peers[defaultRoot]
 		return sess.router.Send(peer.WithName(w.Name), w.SendBuf.Data, rch.ConnCollective, rch.NoFlag)
 	}
 	var wg sync.WaitGroup
 	count := w.SendBuf.Count
-	for rank, peer := range sess.cluster {
+	for rank, peer := range sess.peers {
 		wg.Add(1)
 		go func(rank int, peer plan.PeerID, recvBuf *kb.Vector) {
-			if rank == sess.myRank {
+			if rank == sess.rank {
 				recvBuf.CopyFrom(w.SendBuf)
 			} else {
-				m := sess.router.Recv(peer.WithName(w.Name))
+				m := sess.router.Collective.Recv(peer.WithName(w.Name))
 				b := &kb.Vector{Data: m.Data, Count: recvBuf.Count, Type: recvBuf.Type}
 				recvBuf.CopyFrom(b)
 			}
@@ -142,7 +185,7 @@ func (sess *session) runGather(w Workspace) error {
 }
 
 func (sess *session) runGraphs(w Workspace, graphs ...*plan.Graph) error {
-	if len(sess.cluster) == 1 {
+	if len(sess.peers) == 1 {
 		w.RecvBuf.CopyFrom(w.SendBuf)
 		return nil
 	}
@@ -163,7 +206,7 @@ func (sess *session) runGraphs(w Workspace, graphs ...*plan.Graph) error {
 
 	var lock sync.Mutex
 	recvOnto := func(peer plan.PeerID) error {
-		m := sess.router.Recv(peer.WithName(w.Name))
+		m := sess.router.Collective.Recv(peer.WithName(w.Name))
 		b := &kb.Vector{Data: m.Data, Count: w.SendBuf.Count, Type: w.SendBuf.Type}
 		lock.Lock()
 		defer lock.Unlock()
@@ -178,7 +221,7 @@ func (sess *session) runGraphs(w Workspace, graphs ...*plan.Graph) error {
 	}
 
 	recvInto := func(peer plan.PeerID) {
-		sess.router.RecvInto(peer.WithName(w.Name), asMessage(w.RecvBuf))
+		sess.router.Collective.RecvInto(peer.WithName(w.Name), asMessage(w.RecvBuf))
 		recvCount++
 	}
 
@@ -188,7 +231,7 @@ func (sess *session) runGraphs(w Workspace, graphs ...*plan.Graph) error {
 		for i, rank := range ranks {
 			wg.Add(1)
 			go func(i, rank int) {
-				errs[i] = op(sess.cluster[rank])
+				errs[i] = op(sess.peers[rank])
 				wg.Done()
 			}(i, rank)
 		}
@@ -198,29 +241,29 @@ func (sess *session) runGraphs(w Workspace, graphs ...*plan.Graph) error {
 
 	seq := func(ranks []int, op func(plan.PeerID)) {
 		for _, rank := range ranks {
-			op(sess.cluster[rank])
+			op(sess.peers[rank])
 		}
 	}
 
 	for _, g := range graphs {
-		prevs := g.Prevs(sess.myRank)
-		if g.IsSelfLoop(sess.myRank) {
+		prevs := g.Prevs(sess.rank)
+		if g.IsSelfLoop(sess.rank) {
 			if err := par(prevs, recvOnto); err != nil {
 				return err
 			}
-			if err := par(g.Nexts(sess.myRank), sendOnto); err != nil {
+			if err := par(g.Nexts(sess.rank), sendOnto); err != nil {
 				return err
 			}
 		} else {
 			if len(prevs) > 1 {
-				log.Errorf("more than once recvInto detected at node %d", sess.myRank)
+				log.Errorf("more than once recvInto detected at node %d", sess.rank)
 			}
 			if len(prevs) == 0 && recvCount == 0 {
 				w.RecvBuf.CopyFrom(w.SendBuf)
 			} else {
 				seq(prevs, recvInto) // len(prevs) == 1 is expected
 			}
-			if err := par(g.Nexts(sess.myRank), sendInto); err != nil {
+			if err := par(g.Nexts(sess.rank), sendInto); err != nil {
 				return err
 			}
 		}
@@ -240,7 +283,7 @@ func ceilDiv(a, b int) int {
 	return a/b + 1
 }
 
-func (sess *session) runStrategies(w Workspace, p partitionFunc, strategies []strategy) error {
+func (sess *session) runStrategiesWithHash(w Workspace, p partitionFunc, strategies strategyList, strategyHash strategyHashFunc) error {
 	k := ceilDiv(w.RecvBuf.Count*w.RecvBuf.Type.Size(), chunkSize)
 	errs := make([]error, k)
 	var wg sync.WaitGroup
@@ -249,10 +292,14 @@ func (sess *session) runStrategies(w Workspace, p partitionFunc, strategies []st
 		go func(i int, w Workspace, s strategy) {
 			errs[i] = sess.runGraphs(w, s.reduceGraph, s.bcastGraph)
 			wg.Done()
-		}(i, w, strategies[i%len(strategies)])
+		}(i, w, strategies.choose(int(strategyHash(i, w.Name))))
 	}
 	wg.Wait()
 	return mergeErrors(errs, "runStrategies")
+}
+
+func (sess *session) runStrategies(w Workspace, p partitionFunc, strategies strategyList) error {
+	return sess.runStrategiesWithHash(w, p, strategies, sess.strategyHash)
 }
 
 var (
@@ -275,4 +322,11 @@ func mergeErrors(errs []error, hint string) error {
 		return nil
 	}
 	return fmt.Errorf("%s failed with %s: %s", hint, utils.Pluralize(failed, "error", "errors"), msg)
+}
+
+func boolToInt8(v bool) int8 {
+	if v {
+		return 1
+	}
+	return 0
 }

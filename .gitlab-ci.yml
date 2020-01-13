@@ -2,55 +2,7 @@
 
 
 stages:
-- test
 - lint
-
-unit test:
-  stage: test
-  image: registry.gitlab.com/lsds-kungfu/image/builder:ubuntu18
-
-  script:
-  - go test -v ./srcs/go/...
-  - | # C++ test
-    ./configure --build-tests
-    make
-    make test
-
-integration test:
-  stage: test
-  image: registry.gitlab.com/lsds-kungfu/image/builder:ubuntu18
-
-  script:
-  - ./configure --build-tests --build-tools
-  - make
-  - ./scripts/tests/run-integration-tests.sh
-  - ./scripts/tests/run-go-tests.sh
-
-python3 test:
-  stage: test
-  image: registry.gitlab.com/lsds-kungfu/image/builder:ubuntu18
-
-  before_script:
-  - |
-    DATA_DIR=$HOME/var/data \
-    ./scripts/download-mnist.sh
-
-  script:
-  - cmake --version
-  - pip3 install -vvv -U .
-  - GOBIN=$PWD/bin go install -v ./srcs/go/cmd/kungfu-run
-
-  - ./scripts/tests/run-python-tests.sh # FIXME: test it without tensorflow
-
-  - ./bin/kungfu-run -H 127.0.0.1:1 -np 1 python3 -m kungfu.tensorflow.v1.examples
-  - ./bin/kungfu-run -H 127.0.0.1:2 -np 2 python3 -m kungfu.tensorflow.v1.examples
-  - ./bin/kungfu-run -H 127.0.0.1:3 -np 3 python3 -m kungfu.tensorflow.v1.examples
-  - ./bin/kungfu-run -H 127.0.0.1:4 -np 4 python3 -m kungfu.tensorflow.v1.examples
-
-  - ./scripts/tests/run-op-tests.sh
-  - ./scripts/tests/run-train-tests.sh
-  - ./benchmarks/adaptation/bench-adaptation.sh # FIXME: make it a test
-  - ./scripts/tests/run-optimizer-tests.sh
 
 go format test:
   stage: lint
@@ -64,6 +16,10 @@ go format test:
   - gofmt -w .
   - git diff --exit-code
 
+  only:
+    changes:
+    - srcs/**/*.go
+
 python format test:
   stage: lint
   # image: alpine:3.9
@@ -74,11 +30,15 @@ python format test:
   #- apk add git python3
   - apt update
   - apt install -y git python3-pip
-  - pip3 install -U -r tests/lint.requirements.txt
+  - pip3 install -U -r tests/requirements.lint.txt
 
   script:
   - ./scripts/clean-code.sh --fmt-py
   - git diff --exit-code
+
+  only:
+    changes:
+    - srcs/**/*.py
 
 clang format test:
   stage: lint
@@ -93,6 +53,12 @@ clang format test:
   - clang-format -version
   - ./scripts/clean-code.sh --fmt-cpp
   - git diff --exit-code
+
+  only:
+    changes:
+    - srcs/**/*.h
+    - srcs/**/*.hpp
+    - srcs/**/*.cpp
 
 clang tidy:
   stage: lint
@@ -109,3 +75,9 @@ clang tidy:
   - clang-tidy -version
   - ./scripts/clean-code.sh --check
   # - git diff
+
+  only:
+    changes:
+    - srcs/**/*.h
+    - srcs/**/*.hpp
+    - srcs/**/*.cpp

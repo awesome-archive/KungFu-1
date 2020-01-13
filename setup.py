@@ -1,3 +1,4 @@
+import multiprocessing
 import os
 import subprocess
 import sys
@@ -24,9 +25,11 @@ def cmake_flag(k, v):
 
 def cmake_tf_ext_flags():
     import tensorflow as tf
+    tf_compile_flags = ' '.join(tf.sysconfig.get_compile_flags())
+    tf_link_flags = ' '.join(tf.sysconfig.get_link_flags())
     return [
-        cmake_flag('TF_INCLUDE', '%s' % tf.sysconfig.get_include()),
-        cmake_flag('TF_LIB', '%s' % tf.sysconfig.get_lib()),
+        cmake_flag('TF_COMPILE_FLAGS', tf_compile_flags),
+        cmake_flag('TF_LINK_FLAGS', tf_link_flags),
         # sysconfig.get_config_var('EXT_SUFFIX')  does't work for python2
         cmake_flag('PY_EXT_SUFFIX', '%s' % sysconfig.get_config_var('SO')),
     ]
@@ -62,6 +65,7 @@ class CMakeBuild(build_ext):
         ] + cmake_tf_ext_flags() + list(
             pass_env([
                 'KUNGFU_BUILD_TOOLS',
+                'KUNGFU_ENABLE_TRACE',
                 'CMAKE_VERBOSE_MAKEFILE',
                 'CMAKE_EXPORT_COMPILE_COMMANDS',
             ]))
@@ -79,12 +83,12 @@ class CMakeBuild(build_ext):
             ['cmake', ext.sourcedir] + cmake_args,
             cwd=self.build_temp,
         )
+        if (os.getenv('CMAKE_BUILD_PARALLEL_LEVEL') is None
+                and os.getenv('READTHEDOCS') is None):
+            os.environ['CMAKE_BUILD_PARALLEL_LEVEL'] = str(
+                multiprocessing.cpu_count())
         subprocess.check_call(
-            [
-                'cmake',
-                '--build',
-                '.',
-            ],
+            ['cmake', '--build', '.'],
             cwd=self.build_temp,
         )
 
@@ -93,7 +97,7 @@ package_dir = './srcs/python'
 
 setup(
     name='kungfu',
-    version='0.1.0',
+    version='0.2.1',
     package_dir={'': package_dir},
     packages=find_packages(package_dir),
     description='KungFu distributed machine learning framework',

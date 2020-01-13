@@ -21,7 +21,10 @@ void order_group_do_rank(order_group_t *og, int rank, callback_t *task)
     GoOrderGroupDoRank(og, rank, task);
 }
 
-void order_group_wait(order_group_t *og) { GoOrderGroupWait(og); }
+void order_group_wait(order_group_t *og, int32_t *arrive_order)
+{
+    GoOrderGroupWait(og, arrive_order);
+}
 
 kungfu_world::kungfu_world()
 {
@@ -35,6 +38,8 @@ kungfu_world::kungfu_world()
 kungfu_world::~kungfu_world() { GoKungfuFinalize(); }
 
 int kungfu_world::Rank() const { return GoKungfuRank(); }
+
+int kungfu_world::LocalRank() const { return GoKungfuLocalRank(); }
 
 int kungfu_world::ClusterSize() const { return GoKungfuClusterSize(); }
 
@@ -75,6 +80,24 @@ int kungfu_world::Barrier() { return GoKungfuBarrier(nullptr); }
 int kungfu_world::Barrier(const DoneCallback &done)
 {
     return GoKungfuBarrier(new CallbackWrapper(done));
+}
+
+int kungfu_world::Consensus(const void *buf, int count, KungFu_Datatype dtype,
+                            bool *ok, const char *name)
+{
+    return GoKungfuConsensus(const_cast<void *>(buf), GoInt(count), dtype,
+                             reinterpret_cast<char *>(ok),
+                             const_cast<char *>(name), nullptr);
+}
+
+int kungfu_world::Consensus(const void *buf, int count, KungFu_Datatype dtype,
+                            bool *ok, const char *name,
+                            const DoneCallback &done)
+{
+    return GoKungfuConsensus(const_cast<void *>(buf), GoInt(count), dtype,
+                             reinterpret_cast<char *>(ok),
+                             const_cast<char *>(name),
+                             new CallbackWrapper(done));
 }
 
 int kungfu_world::Request(int destRank, const char *name, void *buf, int count,
@@ -198,9 +221,11 @@ int kungfu_world::GetPeerLatencies(float *recvbuf, int recv_count)
 }
 
 // control APIs
-int kungfu_world::ResizeCluster(const char *ckpt, int new_size, bool *keep)
+int kungfu_world::ResizeCluster(const char *init_step, int new_size,
+                                bool *changed, bool *keep)
 {
     static_assert(sizeof(bool) == sizeof(char), "");
-    return GoKungfuResizeCluster(const_cast<char *>(ckpt), GoInt(new_size),
+    return GoKungfuResizeCluster(const_cast<char *>(init_step), GoInt(new_size),
+                                 reinterpret_cast<char *>(changed),
                                  reinterpret_cast<char *>(keep));
 }

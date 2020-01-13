@@ -44,10 +44,10 @@ parser.add_argument('--no-cuda',
                     action='store_true',
                     default=False,
                     help='disables CUDA training')
-parser.add_argument('--metric',
+parser.add_argument('--kf-optimizer',
                     type=str,
-                    default='ideal',
-                    help='The monitoring metric')
+                    default='variance',
+                    help='KungFu optimizers')
 parser.add_argument('--interval',
                     type=int,
                     default=1,
@@ -72,19 +72,19 @@ model = getattr(applications, args.model)(weights=None)
 
 opt = tf.train.GradientDescentOptimizer(0.01)
 
-if args.metric == 'variance':
-    from kungfu.tensorflow.v1.optimizers import SyncSGDWithGradVarianceOptimizer
-    opt = SyncSGDWithGradVarianceOptimizer(opt, monitor_interval=args.interval)
-elif args.metric == 'noise-scale':
-    from kungfu.tensorflow.v1.optimizers import SyncSGDWithGradNoiseScaleOptimizer
-    opt = SyncSGDWithGradNoiseScaleOptimizer(opt,
-                                             device_batch_size=args.batch_size,
-                                             monitor_interval=args.interval)
-elif args.metric == 'ideal':
-    from kungfu.tensorflow.v1.optimizers import SyncSGDOptimizer
-    opt = SyncSGDOptimizer(opt)
-else:
-    raise Exception('Unknown monitoring metric: %s' % args.metric)
+if args.kf_optimizer:
+    if args.kf_optimizer == 'variance':
+        from kungfu.tensorflow.optimizers import MonitorGradientVarianceOptimizer
+        opt = MonitorGradientVarianceOptimizer(opt,
+                                               monitor_interval=args.interval)
+    elif args.kf_optimizer == 'noise-scale':
+        from kungfu.tensorflow.optimizers import MonitorGradientNoiseScaleOptimizer
+        opt = MonitorGradientNoiseScaleOptimizer(
+            opt,
+            device_batch_size=args.batch_size,
+            monitor_interval=args.interval)
+    else:
+        raise Exception('Unknown KungFu optimizer')
 
 data = tf.random_uniform([args.batch_size, 224, 224, 3])
 target = tf.random_uniform([args.batch_size, 1],
@@ -129,10 +129,6 @@ def run(benchmark_step):
 
 loss = loss_function()
 train_opt = opt.minimize(loss)
-if hasattr(opt, 'distributed_initializer'):
-    kf_init = opt.distributed_initializer()
-else:
-    kf_init = None
 
 if tf.executing_eagerly():
     with tf.device(device):
@@ -142,6 +138,7 @@ else:
     init = tf.global_variables_initializer()
     with tf.Session(config=config) as session:
         session.run(init)
-        if kf_init:
-            session.run(kf_init)
+        if args.kf_optimizer:
+            from kungfu.tensorflow.initializer import BroadcastGlobalVariablesOp
+            session.run(BroadcastGlobalVariablesOp())
         run(lambda: session.run(train_opt))

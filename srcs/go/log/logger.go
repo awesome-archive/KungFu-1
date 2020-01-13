@@ -8,23 +8,49 @@ import (
 	"time"
 
 	"github.com/lsds/KungFu/srcs/go/kungfuconfig"
+	"github.com/lsds/KungFu/srcs/go/utils/xterm"
 )
 
+type Level int32
+
+const (
+	Debug Level = iota
+	Info  Level = iota
+	Warn  Level = iota
+	Error Level = iota
+)
+
+var logLevelMap = map[string]Level{
+	`DEBUG`: Debug,
+	`INFO`:  Info,
+	`WARN`:  Warn,
+	`ERROR`: Error,
+}
+
+func parseLogLevel(val string) Level {
+	return logLevelMap[val]
+}
+
 var std = New()
+
+const (
+	ShowTimestamp = 1 << iota
+)
 
 type Logger struct {
 	sync.Mutex
 	w     io.Writer
 	buf   []byte
 	t0    time.Time
-	debug bool
+	level Level
+	flags uint32
 }
 
 func New() *Logger {
 	l := &Logger{
 		w:     os.Stdout,
 		t0:    time.Now(),
-		debug: kungfuconfig.ShowDebugLog,
+		level: parseLogLevel(kungfuconfig.LogLevel),
 	}
 	return l
 }
@@ -52,9 +78,13 @@ func (l *Logger) output(prefix, format string, v ...interface{}) {
 	d := time.Since(l.t0)
 	l.buf = l.buf[:0]
 	l.buf = append(l.buf, prefix...)
-	l.buf = append(l.buf, ' ', '[')
-	l.buf = append(l.buf, fmtDuration(d)...)
-	l.buf = append(l.buf, ']', ' ')
+	if l.flags&ShowTimestamp != 0 {
+		l.buf = append(l.buf, ' ', '[')
+		l.buf = append(l.buf, fmtDuration(d)...)
+		l.buf = append(l.buf, ']', ' ')
+	} else {
+		l.buf = append(l.buf, ' ')
+	}
 	s := fmt.Sprintf(format, v...)
 	l.buf = append(l.buf, s...)
 	if len(s) == 0 || s[len(s)-1] != '\n' {
@@ -63,30 +93,30 @@ func (l *Logger) output(prefix, format string, v ...interface{}) {
 	l.w.Write(l.buf)
 }
 
-func (l *Logger) logf(level, format string, v ...interface{}) {
-	l.output(level, format, v...)
-}
-
-func (l *Logger) Debugf(format string, v ...interface{}) {
-	if l.debug {
-		l.logf("[D] ", format, v...)
+func (l *Logger) logf(level Level, prefix, format string, v ...interface{}) {
+	if level >= l.level {
+		l.output(prefix, format, v...)
 	}
 }
 
+func (l *Logger) Debugf(format string, v ...interface{}) {
+	l.logf(Debug, "[D]", format, v...)
+}
+
 func (l *Logger) Infof(format string, v ...interface{}) {
-	l.logf("[I] ", format, v...)
+	l.logf(Info, "[I]", format, v...)
 }
 
 func (l *Logger) Warnf(format string, v ...interface{}) {
-	l.logf("[W] ", format, v...)
+	l.logf(Warn, "[W]", format, v...)
 }
 
 func (l *Logger) Errorf(format string, v ...interface{}) {
-	l.logf("[E] ", format, v...)
+	l.logf(Error, xterm.Warn.S("[E]"), format, v...)
 }
 
 func (l *Logger) Exitf(format string, v ...interface{}) {
-	l.logf("[E] ", format, v...)
+	l.logf(Error, xterm.Warn.S("[F]"), format, v...)
 	os.Exit(1)
 }
 
@@ -96,11 +126,22 @@ func (l *Logger) SetOutput(w io.Writer) {
 	l.w = w
 }
 
+func (l *Logger) SetFlags(fs ...uint32) {
+	var flags uint32
+	for _, f := range fs {
+		flags |= f
+	}
+	l.Lock()
+	defer l.Unlock()
+	l.flags = flags
+}
+
 var (
 	Debugf    = std.Debugf
 	Infof     = std.Infof
 	Warnf     = std.Warnf
 	Errorf    = std.Errorf
 	Exitf     = std.Exitf
+	SetFlags  = std.SetFlags
 	SetOutput = std.SetOutput
 )

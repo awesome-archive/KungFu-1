@@ -32,7 +32,7 @@ ensure_kungfu_run() {
 ensure_kungfu_run
 export KUNGFU_CONFIG_LOG_CONFIG_VARS=true
 
-SCRIPT=${ROOT}/tests/python/test_mnist_slp.py
+SCRIPT=${ROOT}/tests/python/integration/test_mnist_slp.py
 
 epochs=2
 
@@ -50,7 +50,7 @@ run_parallel_train_test() {
     local np=$2
 
     local hosts=127.0.0.1:$np
-    local timeout=$((np * 6))s
+    local timeout=$((np * 8))s
     local batch_size=$((total_batch_size / np))
 
     ${KUNGFU_RUN} \
